@@ -122,15 +122,30 @@ public class CommonConfigurationKeysPublic {
   public static final String  NET_LINK_SCRIPT_FILE_NAME_KEY =
     "net.link.script.file.name";
 
+  /** Default link cost to be considered if link script has not been provided or
+   * if the script fails.
+   */
   public static final String  NET_LINK_DEFAULT_COST_KEY =
     "net.link.default.cost";
   /** Default value for NET_LINK_DEFAULT_COST_KEY */
   public static final int  NET_LINK_DEFAULT_COST_DEFAULT = 1;
 
+  /** The same rack penalty to be considered during our greedy link cost based
+   * heuristics.
+   */
   public static final String  NET_LINK_SAME_RACK_PENALTY_KEY =
     "net.link.samerack.penalty";
   /** Default value for NET_LINK_SAME_RACK_PENALTY_KEY */
   public static final int  NET_LINK_SAME_RACK_PENALTY_DEFAULT = 5;
+
+  /** Can be used to disable pipeline sorting. This may be needed if you want
+   * the greedy heuristics to be followed in the exact precise order in which
+   * results were picked.
+   */
+  public static final String  NET_LINK_DISABLE_PIPELINE_SORT_KEY =
+    "net.link.disable.pipeline.sort";
+  /** Default value for NET_LINK_DISABLE_PIPELINE_SORT_KEY */
+  public static final boolean  NET_LINK_DISABLE_PIPELINE_SORT_DEFAULT = false;
 
   /**
    * @see
