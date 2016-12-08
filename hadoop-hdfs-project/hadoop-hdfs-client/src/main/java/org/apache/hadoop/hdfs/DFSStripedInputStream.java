@@ -41,6 +41,9 @@ import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 
 import org.apache.hadoop.io.erasurecode.ErasureCoderOptions;
 import org.apache.hadoop.io.erasurecode.rawcoder.RawErasureDecoder;
+import org.apache.hadoop.net.*;
+
+import com.google.common.collect.Lists;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -55,6 +58,7 @@ import java.util.Set;
 import java.util.Collection;
 import java.util.Map;
 import java.util.HashMap;
+import java.util.TreeMap;
 import java.util.concurrent.CompletionService;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorCompletionService;
@@ -66,6 +70,7 @@ import java.util.concurrent.Future;
  */
 @InterfaceAudience.Private
 public class DFSStripedInputStream extends DFSInputStream {
+  private final int DEFAULT_COMPUTATION_COST = 0;
 
   private static class ReaderRetryPolicy {
     private int fetchEncryptionKeyTimes = 1;
@@ -151,6 +156,7 @@ public class DFSStripedInputStream extends DFSInputStream {
   private ByteBuffer parityBuf;
   private final ErasureCodingPolicy ecPolicy;
   private final RawErasureDecoder decoder;
+  private final int parityComputationCost;
 
   /**
    * indicate the start/end offset of the current buffered stripe in the
@@ -189,6 +195,7 @@ public class DFSStripedInputStream extends DFSInputStream {
         dataBlkNum, parityBlkNum);
     decoder = CodecUtil.createRawDecoder(dfsClient.getConfiguration(),
         ecPolicy.getCodecName(), coderOptions);
+    parityComputationCost = dfsClient.getConf().getParityComputationCost();
     if (DFSClient.LOG.isDebugEnabled()) {
       DFSClient.LOG.debug("Creating an striped input stream for file " + src);
     }
@@ -307,6 +314,7 @@ public class DFSStripedInputStream extends DFSInputStream {
         stripeLimit - stripeBufOffset);
 
     LocatedStripedBlock blockGroup = (LocatedStripedBlock) currentLocatedBlock;
+    HashMap<String, Integer> linkCosts = getLinkCosts(blockGroup);
     AlignedStripe[] stripes = StripedBlockUtil.divideOneStripe(ecPolicy, cellSize,
         blockGroup, offsetInBlockGroup,
         offsetInBlockGroup + stripeRange.length - 1, curStripeBuf);
@@ -316,7 +324,7 @@ public class DFSStripedInputStream extends DFSInputStream {
     for (AlignedStripe stripe : stripes) {
       // Parse group to get chosen DN location
       StripeReader sreader = new StatefulStripeReader(readingService, stripe,
-          blks, blockReaders, corruptedBlocks);
+          blks, blockReaders, corruptedBlocks, linkCosts);
       sreader.readStripe();
     }
     curStripeBuf.position(stripeBufOffset);
@@ -518,6 +526,20 @@ public class DFSStripedInputStream extends DFSInputStream {
     return (LocatedStripedBlock)lb;
   }
 
+  /** Converts the simple integer cost array to a hashmap of key-value pairs of
+   * the type (Datanode UUID, cost) pairs. This will be useful for the
+   * StripeReader objects.
+   */
+  private HashMap<String, Integer> getLinkCosts(LocatedStripedBlock bg) {
+    int[] linkCosts = bg.getLinkCosts();
+    DatanodeInfo[] di = bg.getLocations();
+    HashMap<String, Integer> costs = new HashMap<String, Integer>();
+    for (int i = 0; i < di.length; i++) {
+      costs.put(di[i].getDatanodeUuid(), linkCosts[i]);
+    }
+    return costs;
+  }
+
   /**
    * Real implementation of pread.
    */
@@ -527,6 +549,7 @@ public class DFSStripedInputStream extends DFSInputStream {
       throws IOException {
     // Refresh the striped block group
     LocatedStripedBlock blockGroup = getBlockGroupAt(block.getStartOffset());
+    HashMap<String, Integer> linkCosts = getLinkCosts(blockGroup);
 
     AlignedStripe[] stripes = StripedBlockUtil.divideByteRangeIntoStripes(
         ecPolicy, cellSize, blockGroup, start, end, buf, offset);
@@ -539,7 +562,7 @@ public class DFSStripedInputStream extends DFSInputStream {
       for (AlignedStripe stripe : stripes) {
         // Parse group to get chosen DN location
         StripeReader preader = new PositionStripeReader(readService, stripe,
-            blks, preaderInfos, corruptedBlocks);
+            blks, preaderInfos, corruptedBlocks, linkCosts);
         preader.readStripe();
       }
     } finally {
@@ -581,14 +604,31 @@ public class DFSStripedInputStream extends DFSInputStream {
     final CorruptedBlocks corruptedBlocks;
     final BlockReaderInfo[] readerInfos;
 
+    // Stores the link cost for the stripe reader to each datanode.
+    // Key: Datanode UUID, Value: Cost.
+    final HashMap<String, Integer> linkCosts;
+
+    // Stores the chunk IDs sorted by their cost. A TreeMap stores the keys in
+    // sorted order, allowing us to pick the chunk with the lowest value.
+    // Key: Cost, Value: List of chunk IDs with that cost.
+    private TreeMap<Integer, List<Integer>> chunkCosts =
+      new TreeMap<Integer, List<Integer>>();
+
+    // Stores chunk IDs which were null before the read operation commenced.
+    // This is important for parity decodes where we need to read the full
+    // stripe and hence issue requests for null data chunks as well.
+    private HashMap<Integer, Boolean> nullChunk = new HashMap<Integer, Boolean>();
+
     StripeReader(CompletionService<Void> service, AlignedStripe alignedStripe,
         LocatedBlock[] targetBlocks, BlockReaderInfo[] readerInfos,
-                 CorruptedBlocks corruptedBlocks) {
+                 CorruptedBlocks corruptedBlocks,
+                 HashMap<String, Integer> linkCosts) {
       this.service = service;
       this.alignedStripe = alignedStripe;
       this.targetBlocks = targetBlocks;
       this.readerInfos = readerInfos;
       this.corruptedBlocks = corruptedBlocks;
+      this.linkCosts = linkCosts;
     }
 
     /** prepare all the data chunks */
@@ -616,14 +656,28 @@ public class DFSStripedInputStream extends DFSInputStream {
     }
 
     /**
-     * We need decoding. Thus go through all the data chunks and make sure we
-     * submit read requests for all of them.
+     * We need decoding as we have chosen parity chunks either because some data
+     * chunks have been lost or because they have a lower cost. We need to issue
+     * read requests for all null data chunks which were skipped because of
+     * alignment in the stripe. 
      */
     private void readDataForDecoding() throws IOException {
       prepareDecodeInputs();
       for (int i = 0; i < dataBlkNum; i++) {
-        Preconditions.checkNotNull(alignedStripe.chunks[i]);
-        if (alignedStripe.chunks[i].state == StripingChunk.REQUESTED) {
+        // Need to be careful to avoid issuing read requests for data chunks
+        // that were skipped not because of being null but because they had a
+        // higher cost.
+        if (alignedStripe.chunks[i] != null && !nullChunk.containsKey(i) &&
+            alignedStripe.chunks[i].state == StripingChunk.REQUESTED) {
+          // This chunk wasn't null before, isn't null now and state is
+          // REQUESTED. This means that this chunk was deliberately skipped.
+          // Mark it as missing.
+          alignedStripe.chunks[i].state = StripingChunk.MISSING;
+
+        } else if (alignedStripe.chunks[i] != null && nullChunk.containsKey(i) &&
+            alignedStripe.chunks[i].state == StripingChunk.REQUESTED) {
+          // This was a null chunk before, which got reinitialized because of
+          // the prepareDecodeInputs() call. We need to issue a read req for this.
           if (!readChunk(targetBlocks[i], i)) {
             alignedStripe.missingChunksNum++;
           }
@@ -645,7 +699,6 @@ public class DFSStripedInputStream extends DFSInputStream {
       }
       checkMissingBlocks();
     }
-
     boolean createBlockReader(LocatedBlock block, int chunkIndex)
         throws IOException {
       BlockReader reader = null;
@@ -744,23 +797,137 @@ public class DFSStripedInputStream extends DFSInputStream {
       return true;
     }
 
-    /** read the whole stripe. do decoding if necessary */
-    void readStripe() throws IOException {
-      for (int i = 0; i < dataBlkNum; i++) {
-        if (alignedStripe.chunks[i] != null &&
-            alignedStripe.chunks[i].state != StripingChunk.ALLZERO) {
-          if (!readChunk(targetBlocks[i], i)) {
-            alignedStripe.missingChunksNum++;
+    /** Generates a sorted list of chunks based on their link costs. If there
+     * are multiple chunks with the same cost, we give priority to the one with
+     * the lower chunk index. This is to maintain the original read order incase
+     * all chunks are equal in terms of link costs.
+     */
+    void sortChunksByLinkCost() {
+      for (int i = 0; i < dataBlkNum + parityBlkNum; i++) {
+        assert targetBlocks[i].getLocations().length == 1 : "Unexpected size";
+        int linkCost, cost;
+        if (targetBlocks[i] == null) {
+          // Seems like a missing chunk. We can ignore I think.
+          // Pick any reasonable value. It will get ignored later.
+          linkCost = 1;
+        } else {
+          DatanodeInfo di = targetBlocks[i].getLocations()[0];
+          String key = di.getDatanodeUuid();
+          assert linkCosts.get(key) != null : "Cost can't be null";
+          linkCost = linkCosts.get(key);
+        }
+        if (i < dataBlkNum) {
+          // Data chunk
+          cost = linkCost;
+          if (alignedStripe.chunks[i] == null) {
+            // This is a null chunk.
+            nullChunk.put(i, true);
+          }
+        } else {
+          // Parity chunk. Cost equals link cost plus the decode computational cost.
+          cost = linkCost + parityComputationCost;
+        }
+        List<Integer> list = chunkCosts.get(cost);
+        if (list == null) {
+          list = Lists.newArrayListWithExpectedSize(1);
+          chunkCosts.put(cost, list);
+        }
+        list.add(i);
+      }
+    }
+    /** Tries to pick the requested number of chunks greedily. Does a best
+     * effort ie. if it can't find enough chunks, it will quit quietly.
+     * Returns a boolean indicating whether a parity chunk was chosen. 
+     */
+    Boolean selectChunksGreedy(int target) throws IOException {
+      int selected = 0;
+      boolean parityChunksChosen = false;
+
+      // Begin greedy picking
+      while (selected < target) {
+        Map.Entry<Integer, List<Integer>> treeEntry = chunkCosts.pollFirstEntry();
+        if (treeEntry == null) {
+          // No more choices left. Give up
+          break;
+        }
+        int cost = treeEntry.getKey();
+        List<Integer> chunkIndices = treeEntry.getValue();
+        int chosenIdx = chunkIndices.remove(0);
+        if (chunkIndices.size() != 0) {
+          // There exist chunks with the same cost. Re-add them for
+          // consideration
+          chunkCosts.put(cost, chunkIndices);
+        }
+
+        if (DFSClient.LOG.isDebugEnabled()) {
+          if (chosenIdx < dataBlkNum) {
+            DFSClient.LOG.debug("Picked data chunk " + chosenIdx + ", cost " + cost);
+          } else if (chosenIdx >= dataBlkNum && chosenIdx < dataBlkNum + parityBlkNum) {
+            DFSClient.LOG.debug("Picked parity chunk " + chosenIdx + ", cost " + cost);
+          } else {
+            assert false: "Unidentified index " + chosenIdx + " chosen.";
+          }
+        }
+
+        // Greedy choice has been made. Try to read the chosen chunk.
+        if (chosenIdx < dataBlkNum) {
+          // This is a data chunk, which can be read. Try reading
+          if (!nullChunk.containsKey(chosenIdx) &&
+              alignedStripe.chunks[chosenIdx].state != StripingChunk.ALLZERO) {
+
+            if (!readChunk(targetBlocks[chosenIdx], chosenIdx)) {
+              // Failed to read data chunk. Increment counter
+              alignedStripe.missingChunksNum++;
+            } else {
+              // We got a fine data chunk!
+              selected++;
+            }
+          }
+
+        } else if (chosenIdx >= dataBlkNum && chosenIdx < dataBlkNum + parityBlkNum) {
+          // This is a parity chunk
+          prepareDecodeInputs();
+          if (alignedStripe.chunks[chosenIdx] == null) {
+            if (!prepareParityChunk(chosenIdx) ||
+                !readChunk(targetBlocks[chosenIdx], chosenIdx)) {
+              // Parity chunk was not fit. What do we do?
+              alignedStripe.missingChunksNum++;
+            } else {
+              // Parity chunk was fit;
+              parityChunksChosen = true;
+              selected++;
+            }
+          } else {
+            // Parity chunk was not null. This is weird. Maybe it was chosen
+            // before?
           }
         }
       }
-      // There are missing block locations at this stage. Thus we need to read
-      // the full stripe and one more parity block.
-      if (alignedStripe.missingChunksNum > 0) {
-        checkMissingBlocks();
+      return parityChunksChosen;
+    }
+
+    /** read the whole stripe. do decoding if necessary */
+    void readStripe() throws IOException {
+      sortChunksByLinkCost();
+
+      // Greedily pick the chunks
+      // NOTE - We only need to fetch the non-null chunks
+      boolean parityChunksChosen = selectChunksGreedy(dataBlkNum - nullChunk.size());
+
+      // See if we need to issue read the whole stripe (including null chunks)
+      // because of parity chunks being chosen.
+      if (alignedStripe.missingChunksNum > 0 || parityChunksChosen) {
+        // Parity chunks were chosen because either some data chunks were
+        // missing or because they had a lower cost.
+        int missing = alignedStripe.missingChunksNum;
         readDataForDecoding();
-        // read parity chunks
-        readParityChunks(alignedStripe.missingChunksNum);
+        if (alignedStripe.missingChunksNum > 0) {
+          // selectChunksGreedy() would have already accounted for the missing
+          // chunks. Fetch new chunks only if we encountered some new missing
+          // chunks during readDataForDecoding()
+          selectChunksGreedy(alignedStripe.missingChunksNum - missing);
+          checkMissingBlocks();
+        }
       }
       // TODO: for a full stripe we can start reading (dataBlkNum + 1) chunks
 
@@ -794,9 +961,8 @@ public class DFSStripedInputStream extends DFSInputStream {
             final int missing = alignedStripe.missingChunksNum;
             alignedStripe.missingChunksNum++;
             checkMissingBlocks();
-
             readDataForDecoding();
-            readParityChunks(alignedStripe.missingChunksNum - missing);
+            selectChunksGreedy(alignedStripe.missingChunksNum - missing);
           }
         } catch (InterruptedException ie) {
           String err = "Read request interrupted";
@@ -807,7 +973,7 @@ public class DFSStripedInputStream extends DFSInputStream {
         }
       }
 
-      if (alignedStripe.missingChunksNum > 0) {
+      if (alignedStripe.missingChunksNum > 0 || parityChunksChosen) {
         decode();
       }
     }
@@ -818,9 +984,10 @@ public class DFSStripedInputStream extends DFSInputStream {
 
     PositionStripeReader(CompletionService<Void> service,
         AlignedStripe alignedStripe, LocatedBlock[] targetBlocks,
-        BlockReaderInfo[] readerInfos, CorruptedBlocks corruptedBlocks) {
+        BlockReaderInfo[] readerInfos, CorruptedBlocks corruptedBlocks,
+        HashMap<String, Integer> linkCosts) {
       super(service, alignedStripe, targetBlocks, readerInfos,
-          corruptedBlocks);
+          corruptedBlocks, linkCosts);
     }
 
     @Override
@@ -854,9 +1021,10 @@ public class DFSStripedInputStream extends DFSInputStream {
 
     StatefulStripeReader(CompletionService<Void> service,
         AlignedStripe alignedStripe, LocatedBlock[] targetBlocks,
-        BlockReaderInfo[] readerInfos, CorruptedBlocks corruptedBlocks) {
+        BlockReaderInfo[] readerInfos, CorruptedBlocks corruptedBlocks,
+        HashMap<String, Integer> linkCosts) {
       super(service, alignedStripe, targetBlocks, readerInfos,
-          corruptedBlocks);
+          corruptedBlocks, linkCosts);
     }
 
     @Override

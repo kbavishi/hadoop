@@ -44,6 +44,8 @@ import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_CACH
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_CACHED_CONN_RETRY_KEY;
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_DATANODE_RESTART_TIMEOUT_DEFAULT;
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_DATANODE_RESTART_TIMEOUT_KEY;
+import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_PARITY_COMPUTATION_COST_KEY;
+import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_PARITY_COMPUTATION_COST_DEFAULT;
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_DOMAIN_SOCKET_DATA_TRAFFIC;
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_DOMAIN_SOCKET_DATA_TRAFFIC_DEFAULT;
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_KEY_PROVIDER_CACHE_EXPIRY_DEFAULT;
@@ -125,6 +127,7 @@ public class DfsClientConf {
   private final int retryIntervalForGetLastBlockLength;
   private final long datanodeRestartTimeout;
   private final long slowIoWarningThresholdMs;
+  private final int parityComputationCost;
 
   private final ShortCircuitConf shortCircuitConf;
 
@@ -239,6 +242,9 @@ public class DfsClientConf {
     slowIoWarningThresholdMs = conf.getLong(
         DFS_CLIENT_SLOW_IO_WARNING_THRESHOLD_KEY,
         DFS_CLIENT_SLOW_IO_WARNING_THRESHOLD_DEFAULT);
+    parityComputationCost = conf.getInt(
+        DFS_CLIENT_PARITY_COMPUTATION_COST_KEY,
+        DFS_CLIENT_PARITY_COMPUTATION_COST_DEFAULT);
 
     shortCircuitConf = new ShortCircuitConf(conf);
 
@@ -526,6 +532,13 @@ public class DfsClientConf {
    */
   public long getDatanodeRestartTimeout() {
     return datanodeRestartTimeout;
+  }
+
+  /**
+   * @return the parityComputationCost
+   */
+  public int getParityComputationCost() {
+    return parityComputationCost;
   }
 
   /**

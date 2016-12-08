@@ -40,6 +40,7 @@ import java.util.*;
 public class BlockPlacementPolicyRackFaultTolerantGDA extends BlockPlacementPolicyDefault {
 
   private int sameRackPenalty;
+  private boolean disablePipelineSort;
 
   @Override
   public void initialize(Configuration conf,  FSClusterStats stats,
@@ -48,7 +49,22 @@ public class BlockPlacementPolicyRackFaultTolerantGDA extends BlockPlacementPoli
     this.sameRackPenalty = conf.getInt(
         DFSConfigKeys.NET_LINK_SAME_RACK_PENALTY_KEY,
         DFSConfigKeys.NET_LINK_SAME_RACK_PENALTY_DEFAULT);
+    this.disablePipelineSort = conf.getBoolean(
+        DFSConfigKeys.NET_LINK_DISABLE_PIPELINE_SORT_KEY,
+        DFSConfigKeys.NET_LINK_DISABLE_PIPELINE_SORT_DEFAULT);
     super.initialize(conf, stats, clusterMap, host2datanodeMap);
+  }
+
+  @Override
+  protected DatanodeStorageInfo[] getPipeline(Node writer,
+      DatanodeStorageInfo[] storages) {
+    if (this.disablePipelineSort) {
+      // Do not try to sort the pipeline. This interferes with our greedy GDA
+      // link cost heuristics.
+      return storages;
+    } else {
+      return super.getPipeline(writer, storages);
+    }
   }
 
   @Override
@@ -111,9 +127,6 @@ public class BlockPlacementPolicyRackFaultTolerantGDA extends BlockPlacementPoli
                             boolean avoidStaleNodes,
                             EnumMap<StorageType, Integer> storageTypes)
                             throws NotEnoughReplicasException {
-    StringBuilder builder = null;
-    if (LOG.isDebugEnabled()) {
-    }
     boolean badTarget = false;
     DatanodeStorageInfo firstChosen = null;
 

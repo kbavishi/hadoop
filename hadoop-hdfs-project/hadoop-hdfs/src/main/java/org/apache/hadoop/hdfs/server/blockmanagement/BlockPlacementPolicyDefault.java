@@ -878,7 +878,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
    * starts from the writer and traverses all <i>nodes</i>
    * This is basically a traveling salesman problem.
    */
-  private DatanodeStorageInfo[] getPipeline(Node writer,
+  protected DatanodeStorageInfo[] getPipeline(Node writer,
       DatanodeStorageInfo[] storages) {
     if (storages.length == 0) {
       return storages;

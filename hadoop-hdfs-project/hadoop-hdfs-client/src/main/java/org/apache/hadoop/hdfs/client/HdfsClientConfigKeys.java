@@ -103,6 +103,8 @@ public interface HdfsClientConfigKeys {
   String  DFS_CLIENT_DATANODE_RESTART_TIMEOUT_KEY =
       "dfs.client.datanode-restart.timeout";
   long    DFS_CLIENT_DATANODE_RESTART_TIMEOUT_DEFAULT = 30;
+  String  DFS_CLIENT_PARITY_COMPUTATION_COST_KEY = "dfs.client.parity.comp.cost";
+  int     DFS_CLIENT_PARITY_COMPUTATION_COST_DEFAULT = 1000;
   // Much code in hdfs is not yet updated to use these keys.
   // the initial delay (unit is ms) for locateFollowingBlock, the delay time
   // will increase exponentially(double) for each retry.

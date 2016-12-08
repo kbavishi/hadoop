@@ -410,7 +410,7 @@ public class DatanodeManager {
     // sort located block
     for (LocatedBlock lb : locatedBlocks) {
       if (lb.isStriped()) {
-        sortLocatedStripedBlock(lb, comparator);
+        sortLocatedStripedBlock(lb, targetHost, comparator);
       } else {
         sortLocatedBlock(lb, targetHost, comparator);
       }
@@ -424,8 +424,30 @@ public class DatanodeManager {
    * @param lb located striped block
    * @param comparator dn comparator
    */
-  private void sortLocatedStripedBlock(final LocatedBlock lb,
+  private void sortLocatedStripedBlock(final LocatedBlock lb, String targetHost,
       Comparator<DatanodeInfo> comparator) {
+    // As it is possible for the separation of node manager and datanode,
+    // here we should get node but not datanode only .
+    //
+    // XXX-kbavishi: Extremely important to be able to derive the rack name for
+    // the client. For this we need the Node object. If this fails, dont't know
+    // what to do.
+    Node client = getDatanodeByHost(targetHost);
+    if (client == null) {
+      List<String> hosts = new ArrayList<> (1);
+      hosts.add(targetHost);
+      List<String> resolvedHosts = dnsToSwitchMapping.resolve(hosts);
+      if (resolvedHosts != null && !resolvedHosts.isEmpty()) {
+        String rName = resolvedHosts.get(0);
+        if (rName != null) {
+          client = new NodeBase(rName + NodeBase.PATH_SEPARATOR_STR +
+            targetHost);
+        }
+      } else {
+        LOG.error("Node Resolution failed. Please make sure that rack " +
+          "awareness scripts are functional.");
+      }
+    }
     DatanodeInfo[] di = lb.getLocations();
     HashMap<DatanodeInfo, Byte> locToIndex = new HashMap<>();
     HashMap<DatanodeInfo, Token<BlockTokenIdentifier>> locToToken =
@@ -437,6 +459,23 @@ public class DatanodeManager {
     }
     // Move decommissioned/stale datanodes to the bottom
     Arrays.sort(di, comparator);
+
+    // XXX-kbavishi: Extremely important to get link costs after datanodes have
+    // been sorted by their storage IDs. This is to get around passing a HashMap
+    // in the protobuf response and simply reusing the indices used in the
+    // DatanodeInfo[] array.
+    //
+    // In other words, the lb.getLinkCosts()[i] represents the link cost from
+    // client to the datanode in lb.getLocations()[i]
+    int[] costs = new int[di.length];
+    String clientRack = (client != null) ? client.getNetworkLocation() : "";
+
+    for (int i = 0; i < di.length; i++) {
+      String datanodeRack = di[i].getNetworkLocation();
+      costs[i] = networktopology.getRackCost(clientRack, datanodeRack);
+    }
+    // Note that we only set link costs, but do not sort nodes.
+    lsb.setLinkCosts(costs);
 
     // must update cache since we modified locations array
     lb.updateCachedStorageInfo();
