@@ -236,6 +236,7 @@ message LocatedBlockProto {
   // striped block related fields
   optional bytes blockIndices = 9; // used for striped block to indicate block index for each storage
   repeated hadoop.common.TokenProto blockTokens = 10; // each internal block has a block token
+  repeated uint32 linkCosts = 11; // used for storing link cost to each DatanodeInfo
 }
 
 message DataEncryptionKeyProto {

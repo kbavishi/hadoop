@@ -562,10 +562,23 @@ public class PBHelperClient {
       Token<BlockTokenIdentifier>[] blockTokens =
           convertTokens(tokenProtos);
       ((LocatedStripedBlock) lb).setBlockTokens(blockTokens);
+      int[] linkCosts = convertLinkCosts(proto.getLinkCostsList());
+      ((LocatedStripedBlock) lb).setLinkCosts(linkCosts);
     }
     lb.setBlockToken(convert(proto.getBlockToken()));
 
     return lb;
+  }
+
+  static public int[] convertLinkCosts(List<Integer> protoCosts) {
+
+    @SuppressWarnings("unchecked")
+    int[] costs = new int[protoCosts.size()];
+    for (int i = 0; i < costs.length; i++) {
+      costs[i] = protoCosts.get(i);
+    }
+
+    return costs;
   }
 
   static public Token<BlockTokenIdentifier>[] convertTokens(
@@ -836,11 +849,21 @@ public class PBHelperClient {
       builder.setBlockIndices(PBHelperClient.getByteString(indices));
       Token<BlockTokenIdentifier>[] blockTokens = sb.getBlockTokens();
       builder.addAllBlockTokens(convert(blockTokens));
+      int[] linkCosts = sb.getLinkCosts();
+      builder.addAllLinkCosts(convertLinkCosts(linkCosts));
     }
 
     return builder.setB(PBHelperClient.convert(b.getBlock()))
         .setBlockToken(PBHelperClient.convert(b.getBlockToken()))
         .setCorrupt(b.isCorrupt()).setOffset(b.getStartOffset()).build();
+  }
+
+  public static List<Integer> convertLinkCosts(int[] linkCosts) {
+    List<Integer> results = new ArrayList<>(linkCosts.length);
+    for (int i = 0; i < linkCosts.length; i++) {
+      results.add(linkCosts[i]);
+    }
+    return results;
   }
 
   public static List<TokenProto> convert(
