@@ -17,11 +17,14 @@
  */
 package org.apache.hadoop.hdfs.protocol;
 
+import java.util.List;
+import java.util.HashMap;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.net.*;
 
 import java.util.Arrays;
 
@@ -39,6 +42,8 @@ public class LocatedStripedBlock extends LocatedBlock {
   private final byte[] blockIndices;
   private Token<BlockTokenIdentifier>[] blockTokens;
 
+  private int[] linkCosts;
+
   @SuppressWarnings({"unchecked"})
   public LocatedStripedBlock(ExtendedBlock b, DatanodeInfo[] locs,
       String[] storageIDs, StorageType[] storageTypes, byte[] indices,
@@ -55,6 +60,7 @@ public class LocatedStripedBlock extends LocatedBlock {
     for (int i = 0; i < blockIndices.length; i++) {
       blockTokens[i] = EMPTY_TOKEN;
     }
+    linkCosts = new int[this.getLocations().length];
   }
 
   @Override
@@ -83,5 +89,12 @@ public class LocatedStripedBlock extends LocatedBlock {
 
   public void setBlockTokens(Token<BlockTokenIdentifier>[] tokens) {
     this.blockTokens = tokens;
+  }
+
+  public void setLinkCosts(int[] costs) {
+    this.linkCosts = costs;
+  }
+  public int[] getLinkCosts() {
+    return this.linkCosts;
   }
 }
